@@ -1,7 +1,6 @@
 import logging
 import os
 import posixpath
-import sys
 
 from androidemu.config import WRITE_FSTAT_TIMES
 from androidemu.cpu.syscall_handlers import SyscallHandlers
@@ -9,6 +8,9 @@ from androidemu.utils import memory_helpers
 from androidemu.vfs import file_helpers
 
 logger = logging.getLogger(__name__)
+
+OVERRIDE_URANDOM = False
+OVERRIDE_URANDOM_BYTE = b"\x00"
 
 
 class VirtualFile:
@@ -37,6 +39,7 @@ class VirtualFileSystem:
         syscall_handler.set_handler(0x3, "read", 3, self._handle_read)
         syscall_handler.set_handler(0x5, "open", 3, self._handle_open)
         syscall_handler.set_handler(0x6, "close", 1, self._handle_close)
+        syscall_handler.set_handler(0x21, "access", 2, self._handle_access)
         syscall_handler.set_handler(0x92, "writev", 3, self._handle_writev)
         syscall_handler.set_handler(0xC5, "fstat64", 2, self._handle_fstat64)
         syscall_handler.set_handler(0x142, "openat", 4, self._handle_openat)
@@ -108,7 +111,10 @@ class VirtualFileSystem:
         logger.info("Reading %d bytes from '%s'" % (count, file.name))
 
         if file.descriptor == 'urandom':
-            buf = os.urandom(count)
+            if OVERRIDE_URANDOM:
+                buf = OVERRIDE_URANDOM_BYTE * count
+            else:
+                buf = os.urandom(count)
         else:
             buf = os.read(file.descriptor, count)
 
@@ -149,12 +155,19 @@ class VirtualFileSystem:
 
         return 0
 
+    def _handle_access(self, mu, filename_ptr, flags):
+        filename = memory_helpers.read_utf8(mu, filename_ptr)
+        logger.warning("Path '%s'" % filename)
+        return 0
+
     def _handle_writev(self, mu, fd, vec, vlen):
         if fd == 2:
             for i in range(0, vlen):
                 addr = memory_helpers.read_ptr(mu, (i * 8) + vec)
                 size = memory_helpers.read_ptr(mu, (i * 8) + vec + 4)
-                sys.stderr.buffer.write(mu.mem_read(addr, size))
+                data = bytes(mu.mem_read(addr, size)).decode(encoding='UTF-8')
+
+                logger.error('Writev %s' % data)
 
             return 0
 
@@ -230,6 +243,12 @@ class VirtualFileSystem:
 
         logger.info("File fstatat64 '%s'" % pathname)
         pathname = self.translate_path(pathname)
+
+        if not os.path.exists(pathname):
+            logger.warning('> File was not found.')
+            return -1
+
+        logger.warning('> File was found.')
 
         stat = file_helpers.stat64(path=pathname)
         # stat = os.stat(path=file_path, dir_fd=None, follow_symlinks=False)

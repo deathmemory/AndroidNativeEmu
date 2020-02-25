@@ -4,6 +4,8 @@ Allows you to partly emulate an Android native library.
 
 This is an educational project to learn more about the ELF file format and [Unicorn](https://github.com/unicorn-engine/unicorn).
 
+[中文README](README_cn.md)
+
 ## Features
 
 - Emulation of the [JNI Invocation API](https://docs.oracle.com/javase/7/docs/technotes/guides/jni/spec/invocation.html) so `JNI_OnLoad` can be called properly.

@@ -10,12 +10,13 @@ class JavaClassDef(type):
     next_jvm_method_id = itertools.count(start=0xd2000000, step=4)
     next_jvm_field_id = itertools.count(start=0xe2000000, step=4)
 
-    def __init__(cls, name, base, ns, jvm_name=None, jvm_fields=None, jvm_ignore=False):
+    def __init__(cls, name, base, ns, jvm_name=None, jvm_fields=None, jvm_ignore=False, jvm_super=None):
         cls.jvm_id = next(JavaClassDef.next_jvm_id)
         cls.jvm_name = jvm_name
         cls.jvm_methods = dict()
         cls.jvm_fields = dict()
         cls.jvm_ignore = jvm_ignore
+        cls.jvm_super = jvm_super
 
         # Register all defined Java methods.
         for func in inspect.getmembers(cls, predicate=inspect.isfunction):
@@ -48,8 +49,10 @@ class JavaClassDef(type):
                 break
 
         if not found:
-            raise RuntimeError("Register native ('%s', '%s') failed on class %s." % (name, signature, self.__name__))
-
+            x = "Register native ('%s', '%s') failed on class %s." % (name, signature, self.__name__)
+            logger.warning(x)
+            return
+            # raise RuntimeError("Register native ('%s', '%s') failed on class %s." % (name, signature, self.__name__))
         logger.debug("Registered native function ('%s', '%s') to %s.%s" % (name, signature,
                                                                            self.__name__, found_method.func_name))
 
@@ -71,4 +74,10 @@ class JavaClassDef(type):
         return None
 
     def find_field_by_id(cls, jvm_id):
+        try:
+            if cls.jvm_super is not None:
+                return cls.jvm_super.find_field_by_id(jvm_id)
+        except KeyError:
+            pass
+
         return cls.jvm_fields[jvm_id]

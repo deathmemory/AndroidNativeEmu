@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 
 
 class Emulator:
-
     """
     :type mu Uc
     :type modules Modules
@@ -41,7 +40,7 @@ class Emulator:
             self._enable_vfp()
 
         # Android
-        self.system_properties = {}
+        self.system_properties = {"libc.debug.malloc.options": ""}
 
         # Stack.
         self.mu.mem_map(config.STACK_ADDR, config.STACK_SIZE)
@@ -109,8 +108,14 @@ class Emulator:
         finally:
             self.mu.mem_unmap(address, mem_size)
 
-    def load_library(self, filename):
-        return self.modules.load_module(filename)
+    def load_library(self, filename, do_init=True):
+        libmod = self.modules.load_module(filename)
+        if do_init:
+            logger.debug("Calling init for: %s " % filename)
+            for fun_ptr in libmod.init_array:
+                logger.debug("Calling Init function: %x " % fun_ptr)
+                self.call_native(fun_ptr)
+        return libmod
 
     def call_symbol(self, module, symbol_name, *argv):
         symbol = module.find_symbol(symbol_name)
@@ -119,7 +124,7 @@ class Emulator:
             logger.error('Unable to find symbol \'%s\' in module \'%s\'.' % (symbol_name, module.filename))
             return
 
-        self.call_native(symbol.address, *argv)
+        return self.call_native(symbol.address, *argv)
 
     def call_native(self, addr, *argv):
         # Detect JNI call
@@ -151,10 +156,7 @@ class Emulator:
             if is_jni:
                 self.java_vm.jni_env.clear_locals()
 
-    def dump(self):
-        local_dir = os.path.dirname(__file__)
-        out_dir = os.path.join(local_dir, 'dump', str(int(time.time())))
-
+    def dump(self, out_dir):
         os.makedirs(out_dir)
 
         for begin, end, prot in [reg for reg in self.mu.mem_regions()]:

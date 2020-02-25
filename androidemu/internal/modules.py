@@ -9,11 +9,12 @@ from androidemu.internal import get_segment_protection, arm
 from androidemu.internal.module import Module
 from androidemu.internal.symbol_resolved import SymbolResolved
 
+import struct
+
 logger = logging.getLogger(__name__)
 
 
 class Modules:
-
     """
     :type emu androidemu.emulator.Emulator
     :type modules list[Module]
@@ -31,6 +32,19 @@ class Modules:
             if addr in module.symbol_lookup:
                 return module.symbol_lookup[addr]
         return None, None
+
+    def find_symbol_str(self, symbol_str):
+        for module in self.modules:
+            sym = module.find_symbol(symbol_str)
+            if sym is not None:
+                return sym
+        return None
+
+    def find_module(self, addr):
+        for module in self.modules:
+            if module.base == addr:
+                return module
+        return None
 
     def load_module(self, filename):
         logger.debug("Loading module '%s'." % filename)
@@ -74,9 +88,53 @@ class Modules:
                 self.emu.memory.mem_map(load_base + segment.header.p_vaddr, segment.header.p_memsz, prot)
                 self.emu.memory.mem_write(load_base + segment.header.p_vaddr, segment.data())
 
+            rel_section = None
+            for section in elf.iter_sections():
+                if not isinstance(section, RelocationSection):
+                    continue
+                rel_section = section
+                break
+
             # Parse section header (Linking view).
             dynsym = elf.get_section_by_name(".dynsym")
             dynstr = elf.get_section_by_name(".dynstr")
+
+            # Find init array.
+            init_array_size = 0
+            init_array_offset = 0
+            init_array = []
+            for x in elf.iter_segments():
+                if x.header.p_type == "PT_DYNAMIC":
+                    for tag in x.iter_tags():
+                        if tag.entry.d_tag == "DT_INIT_ARRAYSZ":
+                            init_array_size = tag.entry.d_val
+                        elif tag.entry.d_tag == "DT_INIT_ARRAY":
+                            init_array_offset = tag.entry.d_val
+
+            for _ in range(int(init_array_size / 4)):
+                # covert va to file offset
+                for seg in load_segments:
+                    if seg.header.p_vaddr <= init_array_offset < seg.header.p_vaddr + seg.header.p_memsz:
+                        init_array_foffset = init_array_offset - seg.header.p_vaddr + seg.header.p_offset
+                fstream.seek(init_array_foffset)
+                data = fstream.read(4)
+                fun_ptr = struct.unpack('I', data)[0]
+                if fun_ptr != 0:
+                    # fun_ptr += load_base
+                    init_array.append(fun_ptr + load_base)
+                    # print ("find init array for :%s %x" % (filename, fun_ptr))
+                else:
+                    # search in reloc
+                    for rel in rel_section.iter_relocations():
+                        rel_info_type = rel['r_info_type']
+                        rel_addr = rel['r_offset']
+                        if rel_info_type == arm.R_ARM_ABS32 and rel_addr == init_array_offset:
+                            sym = dynsym.get_symbol(rel['r_info_sym'])
+                            sym_value = sym['st_value']
+                            init_array.append(load_base + sym_value)
+                            # print ("find init array for :%s %x" % (filename, sym_value))
+                            break
+                init_array_offset += 4
 
             # Resolve all symbols.
             symbols_resolved = dict()
@@ -108,17 +166,21 @@ class Modules:
                     if rel_info_type == arm.R_ARM_ABS32:
                         # Create the new value.
                         value = load_base + sym_value
-
                         # Write the new value
                         self.emu.mu.mem_write(rel_addr, value.to_bytes(4, byteorder='little'))
-                    elif rel_info_type == arm.R_ARM_GLOB_DAT or rel_info_type == arm.R_ARM_JUMP_SLOT:
+
+                    elif rel_info_type == arm.R_ARM_GLOB_DAT or \
+                            rel_info_type == arm.R_ARM_JUMP_SLOT or \
+                            rel_info_type == arm.R_AARCH64_GLOB_DAT or \
+                            rel_info_type == arm.R_AARCH64_JUMP_SLOT:
                         # Resolve the symbol.
                         if sym.name in symbols_resolved:
                             value = symbols_resolved[sym.name].address
 
                             # Write the new value
                             self.emu.mu.mem_write(rel_addr, value.to_bytes(4, byteorder='little'))
-                    elif rel_info_type == arm.R_ARM_RELATIVE:
+                    elif rel_info_type == arm.R_ARM_RELATIVE or \
+                            rel_info_type == arm.R_AARCH64_RELATIVE:
                         if sym_value == 0:
                             # Load address at which it was linked originally.
                             value_orig_bytes = self.emu.mu.mem_read(rel_addr, 4)
@@ -135,8 +197,9 @@ class Modules:
                         logger.error("Unhandled relocation type %i." % rel_info_type)
 
             # Store information about loaded module.
-            module = Module(filename, load_base, bound_high - bound_low, symbols_resolved)
+            module = Module(filename, load_base, bound_high - bound_low, symbols_resolved, init_array)
             self.modules.append(module)
+
             return module
 
     def _elf_get_symval(self, elf, elf_base, symbol):
